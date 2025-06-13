@@ -1,0 +1,128 @@
+# To get started with Dependabot version updates, you'll need to specify which
+# package ecosystems to update and where the package manifests are located.
+# Please see the documentation for all configuration options:
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # Enable version updates for npm
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 10
+    groups:
+      # Group all Backstage package updates together
+      backstage:
+        patterns:
+          - "@backstage/*"
+          - "backstage-*"
+      # Group all dev dependencies
+      dev-dependencies:
+        dependency-type: "development"
+        patterns:
+          - "*"
+      # Group all AWS SDK updates
+      aws-sdk:
+        patterns:
+          - "@aws-sdk/*"
+          - "aws-sdk"
+    # Security updates
+    allow:
+      - dependency-type: "all"
+    # Assignees and reviewers for PRs
+    assignees:
+      - "razmjoo" # Replace with actual maintainer usernames
+    labels:
+      - "dependencies"
+      - "security"
+    # Commit message prefix
+    commit-message:
+      prefix: "chore"
+      prefix-development: "chore"
+      include: "scope"
+
+  # Enable version updates for npm in packages/app
+  - package-ecosystem: "npm"
+    directory: "/packages/app"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 5
+    groups:
+      backstage:
+        patterns:
+          - "@backstage/*"
+      react:
+        patterns:
+          - "react"
+          - "react-*"
+          - "@types/react*"
+
+  # Enable version updates for npm in packages/backend
+  - package-ecosystem: "npm"
+    directory: "/packages/backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 5
+    groups:
+      backstage:
+        patterns:
+          - "@backstage/*"
+
+  # Enable version updates for npm in plugins/infrawallet
+  - package-ecosystem: "npm"
+    directory: "/plugins/infrawallet"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 5
+    groups:
+      backstage:
+        patterns:
+          - "@backstage/*"
+      material-ui:
+        patterns:
+          - "@mui/*"
+          - "@material-ui/*"
+
+  # Enable version updates for npm in plugins/infrawallet-backend
+  - package-ecosystem: "npm"
+    directory: "/plugins/infrawallet-backend"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 5
+    groups:
+      backstage:
+        patterns:
+          - "@backstage/*"
+      database:
+        patterns:
+          - "knex"
+          - "pg"
+          - "@types/pg"
+
+  # Enable version updates for GitHub Actions
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "04:00"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "github-actions"
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+# Security updates are always created immediately
+# regardless of any schedule configured

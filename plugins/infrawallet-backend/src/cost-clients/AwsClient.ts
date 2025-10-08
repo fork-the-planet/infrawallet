@@ -19,6 +19,8 @@ import { CLOUD_PROVIDER, PROVIDER_TYPE } from '../service/consts';
 import { getBillingPeriod, parseCost, parseTags } from '../service/functions';
 import { CostQuery, Report, TagsQuery } from '../service/types';
 import { InfraWalletClient } from './InfraWalletClient';
+import { AWSGetCostAndUsageResponseSchema, AWSGetTagsResponseSchema } from '../schemas/AWSBilling';
+import { ZodError } from 'zod';
 
 export class AwsClient extends InfraWalletClient {
   private readonly accounts: Map<string, string> = new Map();
@@ -142,6 +144,19 @@ export class AwsClient extends InfraWalletClient {
       };
       const command = new GetTagsCommand(input);
       const response = await client.send(command);
+
+      try {
+        AWSGetTagsResponseSchema.parse(response);
+        this.logger.debug(`AWS tags response validation passed`);
+      } catch (error) {
+        if (error instanceof ZodError) {
+          this.logger.warn(`AWS tags response validation failed: ${error.message}`);
+          this.logger.debug(`Sample validation errors: ${JSON.stringify(error.errors.slice(0, 3))}`);
+        } else {
+          this.logger.warn(`Unexpected validation error: ${error.message}`);
+        }
+      }
+
       for (const tag of response.Tags) {
         if (tag) {
           tags.push(tag);
@@ -219,6 +234,18 @@ export class AwsClient extends InfraWalletClient {
       const getCostCommand = new GetCostAndUsageCommand(input);
       const costAndUsageResponse = await client.send(getCostCommand);
 
+      try {
+        AWSGetCostAndUsageResponseSchema.parse(costAndUsageResponse);
+        this.logger.debug(`AWS cost and usage response validation passed`);
+      } catch (error) {
+        if (error instanceof ZodError) {
+          this.logger.warn(`AWS cost and usage response validation failed: ${error.message}`);
+          this.logger.debug(`Sample validation errors: ${JSON.stringify(error.errors.slice(0, 3))}`);
+        } else {
+          this.logger.warn(`Unexpected validation error: ${error.message}`);
+        }
+      }
+
       // get AWS account names
       for (const accountAttributes of costAndUsageResponse.DimensionValueAttributes) {
         const accountId = accountAttributes.Value;
@@ -246,27 +273,58 @@ export class AwsClient extends InfraWalletClient {
       tagKeyValues[k.trim()] = v.trim();
     });
 
+    // Initialize tracking variables
+    let processedRecords = 0;
+    let filteredOutZeroAmount = 0;
+    let filteredOutMissingFields = 0;
+    let filteredOutInvalidDate = 0;
+    const filteredOutTimeRange = 0;
+    const uniqueKeys = new Set<string>();
+    const totalRecords = costResponse?.length || 0;
+
     const transformedData = reduce(
       costResponse,
       (accumulator: { [key: string]: Report }, row) => {
         const rowTime = row.TimePeriod?.Start;
         let period = 'unknown';
-        if (rowTime) {
-          period = getBillingPeriod(query.granularity, rowTime, 'YYYY-MM-DD');
+
+        // Check for invalid date
+        if (!rowTime) {
+          filteredOutInvalidDate++;
+          return accumulator;
         }
+
+        period = getBillingPeriod(query.granularity, rowTime, 'YYYY-MM-DD');
+
         if (row.Groups) {
           row.Groups.forEach((group: any) => {
             const accountId = group.Keys ? group.Keys[0] : '';
             const accountName = this.accounts.get(accountId) || accountId;
+            const serviceName = group.Keys ? group.Keys[1] : '';
+            const groupMetrics = group.Metrics;
+
+            // Check for missing fields
+            if (!accountId || !serviceName || !groupMetrics?.UnblendedCost?.Amount) {
+              filteredOutMissingFields++;
+              return;
+            }
+
+            const amount = parseCost(groupMetrics.UnblendedCost.Amount);
+
+            // Check for zero amount
+            if (amount === 0) {
+              filteredOutZeroAmount++;
+              return;
+            }
 
             if (!this.evaluateIntegrationFilters(accountName, integrationConfig)) {
               return;
             }
 
-            const serviceName = group.Keys ? group.Keys[1] : '';
             const keyName = `${accountId}_${serviceName}`;
 
             if (!accumulator[keyName]) {
+              uniqueKeys.add(keyName);
               accumulator[keyName] = {
                 id: keyName,
                 account: `${this.provider}/${accountName} (${accountId})`,
@@ -279,11 +337,8 @@ export class AwsClient extends InfraWalletClient {
               };
             }
 
-            const groupMetrics = group.Metrics;
-
-            if (groupMetrics !== undefined) {
-              accumulator[keyName].reports[period] = parseCost(groupMetrics.UnblendedCost.Amount);
-            }
+            accumulator[keyName].reports[period] = amount;
+            processedRecords++;
           });
         }
 
@@ -291,6 +346,17 @@ export class AwsClient extends InfraWalletClient {
       },
       {},
     );
+
+    this.logTransformationSummary({
+      processed: processedRecords,
+      uniqueReports: uniqueKeys.size,
+      zeroAmount: filteredOutZeroAmount,
+      missingFields: filteredOutMissingFields,
+      invalidDate: filteredOutInvalidDate,
+      timeRange: filteredOutTimeRange,
+      totalRecords,
+    });
+
     return Object.values(transformedData);
   }
 }

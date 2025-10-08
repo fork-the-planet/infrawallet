@@ -7,6 +7,8 @@ import { CLOUD_PROVIDER, GRANULARITY, PROVIDER_TYPE } from '../service/consts';
 import { parseCost } from '../service/functions';
 import { CostQuery, Report } from '../service/types';
 import { InfraWalletClient } from './InfraWalletClient';
+import { DatadogCostByOrgResponseSchema } from '../schemas/DatadogBilling';
+import { ZodError } from 'zod';
 
 export class DatadogClient extends InfraWalletClient {
   static create(config: Config, database: DatabaseService, cache: CacheService, logger: LoggerService) {
@@ -104,6 +106,18 @@ export class DatadogClient extends InfraWalletClient {
         view: 'sub-org',
       });
 
+      try {
+        DatadogCostByOrgResponseSchema.parse(historicalCost);
+        this.logger.debug(`Datadog historical cost response validation passed`);
+      } catch (error) {
+        if (error instanceof ZodError) {
+          this.logger.warn(`Datadog historical cost response validation failed: ${error.message}`);
+          this.logger.debug(`Sample validation errors: ${JSON.stringify(error.errors.slice(0, 3))}`);
+        } else {
+          this.logger.warn(`Unexpected validation error: ${error.message}`);
+        }
+      }
+
       if (historicalCost.data) {
         costData.push(...historicalCost.data);
       }
@@ -122,6 +136,18 @@ export class DatadogClient extends InfraWalletClient {
         endMonth: endTime,
         view: 'sub-org',
       });
+
+      try {
+        DatadogCostByOrgResponseSchema.parse(estimatedCost);
+        this.logger.debug(`Datadog estimated cost response validation passed`);
+      } catch (error) {
+        if (error instanceof ZodError) {
+          this.logger.warn(`Datadog estimated cost response validation failed: ${error.message}`);
+          this.logger.debug(`Sample validation errors: ${JSON.stringify(error.errors.slice(0, 3))}`);
+        } else {
+          this.logger.warn(`Unexpected validation error: ${error.message}`);
+        }
+      }
 
       if (estimatedCost.data) {
         costData.push(...estimatedCost.data);
@@ -188,25 +214,63 @@ export class DatadogClient extends InfraWalletClient {
       tagKeyValues[k.trim()] = v.trim();
     });
 
+    // Initialize tracking variables
+    let processedRecords = 0;
+    let filteredOutZeroAmount = 0;
+    let filteredOutMissingFields = 0;
+    let filteredOutInvalidDate = 0;
+    const filteredOutTimeRange = 0;
+    const uniqueKeys = new Set<string>();
+    const totalRecords = costResponse?.length || 0;
+
     const transformedData = reduce(
       costResponse,
       (accumulator: { [key: string]: Report }, costByOrg) => {
         const account = costByOrg.orgName;
         const charges = costByOrg.charges;
 
+        // Check for missing fields
+        if (!account || !costByOrg.date) {
+          filteredOutMissingFields++;
+          return accumulator;
+        }
+
         let periodFormat = 'YYYY-MM';
         if (query.granularity === GRANULARITY.DAILY) {
           periodFormat = 'YYYY-MM-DD';
         }
-        const period = moment(costByOrg.date).format(periodFormat);
+
+        const dateObj = moment(costByOrg.date);
+        if (!dateObj.isValid()) {
+          filteredOutInvalidDate++;
+          return accumulator;
+        }
+
+        const period = dateObj.format(periodFormat);
 
         if (charges) {
           charges.forEach((charge: datadogApiV2.ChargebackBreakdown) => {
             const productName = charge.productName;
             const cost = charge.cost;
+
+            // Check for missing fields
+            if (!productName || cost === undefined || cost === null) {
+              filteredOutMissingFields++;
+              return;
+            }
+
+            const amount = parseCost(cost);
+
+            // Check for zero amount
+            if (amount === 0) {
+              filteredOutZeroAmount++;
+              return;
+            }
+
             const keyName = `${account}->${productName} (${charge.chargeType})`;
 
             if (!accumulator[keyName]) {
+              uniqueKeys.add(keyName);
               accumulator[keyName] = {
                 id: keyName,
                 account: `${this.provider}/${account}`,
@@ -219,7 +283,8 @@ export class DatadogClient extends InfraWalletClient {
               };
             }
 
-            accumulator[keyName].reports[period] = parseCost(cost);
+            accumulator[keyName].reports[period] = amount;
+            processedRecords++;
           });
         }
 
@@ -227,6 +292,16 @@ export class DatadogClient extends InfraWalletClient {
       },
       {},
     );
+
+    this.logTransformationSummary({
+      processed: processedRecords,
+      uniqueReports: uniqueKeys.size,
+      zeroAmount: filteredOutZeroAmount,
+      missingFields: filteredOutMissingFields,
+      invalidDate: filteredOutInvalidDate,
+      timeRange: filteredOutTimeRange,
+      totalRecords,
+    });
 
     return Object.values(transformedData);
   }

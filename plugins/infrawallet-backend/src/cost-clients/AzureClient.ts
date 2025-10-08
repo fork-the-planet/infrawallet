@@ -10,6 +10,8 @@ import { CLOUD_PROVIDER, GRANULARITY, PROVIDER_TYPE } from '../service/consts';
 import { getBillingPeriod, parseCost, parseTags } from '../service/functions';
 import { CostQuery, Report, TagsQuery } from '../service/types';
 import { InfraWalletClient } from './InfraWalletClient';
+import { AzureBillingResponseSchema } from '../schemas/AzureBilling';
+import { ZodError } from 'zod';
 
 export class AzureClient extends InfraWalletClient {
   static create(config: Config, database: DatabaseService, cache: CacheService, logger: LoggerService) {
@@ -45,7 +47,21 @@ export class AzureClient extends InfraWalletClient {
       });
       const response = await client.pipeline.sendRequest(client, request);
       if (response.status === 200) {
-        return JSON.parse(response.bodyAsText || '{}');
+        const parsedResponse = JSON.parse(response.bodyAsText || '{}');
+
+        try {
+          AzureBillingResponseSchema.parse(parsedResponse);
+          this.logger.debug(`Azure billing response validation passed`);
+        } catch (error) {
+          if (error instanceof ZodError) {
+            this.logger.warn(`Azure billing response validation failed: ${error.message}`);
+            this.logger.debug(`Sample validation errors: ${JSON.stringify(error.errors.slice(0, 3))}`);
+          } else {
+            this.logger.warn(`Unexpected validation error: ${error.message}`);
+          }
+        }
+
+        return parsedResponse;
       } else if (response.status === 429) {
         const retryAfter = parseInt(
           response.headers.get('x-ms-ratelimit-microsoft.costmanagement-entity-retry-after') || '60',
@@ -213,12 +229,35 @@ export class AzureClient extends InfraWalletClient {
       const [k, v] = tag.split(':');
       tagKeyValues[k.trim()] = v.trim();
     });
+    // Initialize tracking variables
+    let processedRecords = 0;
+    let filteredOutZeroAmount = 0;
+    let filteredOutMissingFields = 0;
+    const filteredOutInvalidDate = 0;
+    let filteredOutTimeRange = 0;
+    const uniqueKeys = new Set<string>();
+    const totalRecords = costResponse?.length || 0;
+
     const transformedData = reduce(
       costResponse,
       (accumulator: { [key: string]: Report }, row) => {
         const cost = row[0];
         let date = row[1];
         const serviceName = row[2];
+
+        // Check for missing fields
+        if (cost === undefined || cost === null || !date || !serviceName) {
+          filteredOutMissingFields++;
+          return accumulator;
+        }
+
+        const amount = parseCost(cost);
+
+        // Check for zero amount
+        if (amount === 0) {
+          filteredOutZeroAmount++;
+          return accumulator;
+        }
 
         if (query.granularity === GRANULARITY.DAILY) {
           // 20240407 -> "2024-04-07"
@@ -231,6 +270,7 @@ export class AzureClient extends InfraWalletClient {
         }
 
         if (!accumulator[keyName]) {
+          uniqueKeys.add(keyName);
           accumulator[keyName] = {
             id: keyName,
             account: `${this.provider}/${accountName} (${subscriptionId})`,
@@ -246,15 +286,29 @@ export class AzureClient extends InfraWalletClient {
         if (!moment(date).isBefore(moment(parseInt(query.startTime, 10)))) {
           if (query.granularity === GRANULARITY.MONTHLY) {
             const yearMonth = getBillingPeriod(query.granularity, date, 'YYYY-MM-DDTHH:mm:ss');
-            accumulator[keyName].reports[yearMonth] = parseCost(cost);
+            accumulator[keyName].reports[yearMonth] = amount;
           } else {
-            accumulator[keyName].reports[date] = parseCost(cost);
+            accumulator[keyName].reports[date] = amount;
           }
+          processedRecords++;
+        } else {
+          filteredOutTimeRange++;
         }
+
         return accumulator;
       },
       {},
     );
+
+    this.logTransformationSummary({
+      processed: processedRecords,
+      uniqueReports: uniqueKeys.size,
+      zeroAmount: filteredOutZeroAmount,
+      missingFields: filteredOutMissingFields,
+      invalidDate: filteredOutInvalidDate,
+      timeRange: filteredOutTimeRange,
+      totalRecords,
+    });
 
     return Object.values(transformedData);
   }

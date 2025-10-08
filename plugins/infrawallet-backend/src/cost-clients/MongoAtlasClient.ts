@@ -8,6 +8,8 @@ import { CLOUD_PROVIDER, PROVIDER_TYPE } from '../service/consts';
 import { getBillingPeriod } from '../service/functions';
 import { CostQuery, Report } from '../service/types';
 import { InfraWalletClient } from './InfraWalletClient';
+import { MongoAtlasInvoicesResponseSchema } from '../schemas/MongoAtlasBilling';
+import { ZodError } from 'zod';
 
 export class MongoAtlasClient extends InfraWalletClient {
   static create(config: Config, database: DatabaseService, cache: CacheService, logger: LoggerService) {
@@ -58,6 +60,18 @@ export class MongoAtlasClient extends InfraWalletClient {
 
       if (response.status !== 200) {
         throw new Error(`Error fetching invoices: ${response.status} ${response.statusText}`);
+      }
+
+      try {
+        MongoAtlasInvoicesResponseSchema.parse(response.data);
+        this.logger.debug(`MongoDB Atlas invoices response validation passed`);
+      } catch (error) {
+        if (error instanceof ZodError) {
+          this.logger.warn(`MongoDB Atlas invoices response validation failed: ${error.message}`);
+          this.logger.debug(`Sample validation errors: ${JSON.stringify(error.errors.slice(0, 3))}`);
+        } else {
+          this.logger.warn(`Unexpected validation error: ${error.message}`);
+        }
       }
 
       const invoices = response.data.results;
@@ -126,7 +140,16 @@ export class MongoAtlasClient extends InfraWalletClient {
 
     const lines = costResponse.split('\n');
     const header = lines[0].split(',');
-    const rows = lines.slice(1);
+    const rows = lines.slice(1).filter(line => line.trim());
+
+    // Initialize tracking variables
+    let processedRecords = 0;
+    let filteredOutZeroAmount = 0;
+    let filteredOutMissingFields = 0;
+    let filteredOutInvalidDate = 0;
+    let filteredOutTimeRange = 0;
+    const uniqueKeys = new Set<string>();
+    const totalRecords = rows.length;
 
     const transformedData = reduce(
       rows,
@@ -137,40 +160,71 @@ export class MongoAtlasClient extends InfraWalletClient {
           rowData[columnName] = columns[index];
         });
 
-        const amount = parseFloat(rowData.Amount) || 0;
-        const billingPeriod = getBillingPeriod(query.granularity, rowData.Date, 'MM/DD/YYYY');
-        const serviceName = rowData.SKU;
-        const cluster = rowData.Cluster || 'Unknown';
-        const project = rowData.Project || 'Unknown';
-
-        const keyName = `${accountName}->${categoryMappingService.getCategoryByServiceName(
-          this.provider,
-          serviceName,
-        )}->${project}->${cluster}`;
-
-        if (!accumulator[keyName]) {
-          accumulator[keyName] = {
-            id: keyName,
-            account: `${this.provider}/${accountName}`,
-            service: this.convertServiceName(serviceName),
-            category: categoryMappingService.getCategoryByServiceName(this.provider, serviceName),
-            provider: this.provider,
-            providerType: PROVIDER_TYPE.INTEGRATION,
-            reports: {},
-            ...{ project: project },
-            ...{ cluster: cluster },
-            ...tagKeyValues,
-          };
+        // Check for missing fields
+        if (!rowData.Amount || !rowData.Date || !rowData.SKU) {
+          filteredOutMissingFields++;
+          return accumulator;
         }
 
-        if (!moment(billingPeriod).isBefore(moment(parseInt(query.startTime, 10)))) {
-          accumulator[keyName].reports[billingPeriod] = (accumulator[keyName].reports[billingPeriod] || 0) + amount;
+        const amount = parseFloat(rowData.Amount) || 0;
+
+        // Check for zero amount
+        if (amount === 0) {
+          filteredOutZeroAmount++;
+          return accumulator;
+        }
+
+        try {
+          const billingPeriod = getBillingPeriod(query.granularity, rowData.Date, 'MM/DD/YYYY');
+          const serviceName = rowData.SKU;
+          const cluster = rowData.Cluster || 'Unknown';
+          const project = rowData.Project || 'Unknown';
+
+          const keyName = `${accountName}->${categoryMappingService.getCategoryByServiceName(
+            this.provider,
+            serviceName,
+          )}->${project}->${cluster}`;
+
+          if (!accumulator[keyName]) {
+            uniqueKeys.add(keyName);
+            accumulator[keyName] = {
+              id: keyName,
+              account: `${this.provider}/${accountName}`,
+              service: this.convertServiceName(serviceName),
+              category: categoryMappingService.getCategoryByServiceName(this.provider, serviceName),
+              provider: this.provider,
+              providerType: PROVIDER_TYPE.INTEGRATION,
+              reports: {},
+              ...{ project: project },
+              ...{ cluster: cluster },
+              ...tagKeyValues,
+            };
+          }
+
+          if (!moment(billingPeriod).isBefore(moment(parseInt(query.startTime, 10)))) {
+            accumulator[keyName].reports[billingPeriod] = (accumulator[keyName].reports[billingPeriod] || 0) + amount;
+            processedRecords++;
+          } else {
+            filteredOutTimeRange++;
+          }
+        } catch (error) {
+          filteredOutInvalidDate++;
         }
 
         return accumulator;
       },
       {},
     );
+
+    this.logTransformationSummary({
+      processed: processedRecords,
+      uniqueReports: uniqueKeys.size,
+      zeroAmount: filteredOutZeroAmount,
+      missingFields: filteredOutMissingFields,
+      invalidDate: filteredOutInvalidDate,
+      timeRange: filteredOutTimeRange,
+      totalRecords,
+    });
 
     return Object.values(transformedData);
   }

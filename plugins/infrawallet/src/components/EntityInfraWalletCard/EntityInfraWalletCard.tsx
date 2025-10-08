@@ -1,3 +1,4 @@
+import { Entity } from '@backstage/catalog-model';
 import { InfoCard, Progress } from '@backstage/core-components';
 import { useApi } from '@backstage/core-plugin-api';
 import { useEntity } from '@backstage/plugin-catalog-react';
@@ -13,7 +14,7 @@ import Tabs from '@mui/material/Tabs';
 import Typography from '@mui/material/Typography';
 import { default as React, useEffect, useState } from 'react';
 import { CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { infraWalletApiRef } from '../../api/InfraWalletApi';
+import { InfraWalletApi, infraWalletApiRef } from '../../api/InfraWalletApi';
 import { CostReportsResponse, Report, Tag } from '../../api/types';
 
 const COLORS = [
@@ -29,13 +30,21 @@ const COLORS = [
   '#00ffff',
 ];
 
-async function getFilteredCostReports(infrawalletApi: any, filters: string, tags: Tag[]): Promise<Report[] | null> {
+const MONTHS_TO_INCLUDE = 2;
+const NUM_DIGITS_AFTER_DECIMALPOINT = 2;
+
+async function getFilteredCostReports(
+  infrawalletApi: InfraWalletApi,
+  entity: Entity,
+  filters: string,
+  tags: Tag[],
+): Promise<Report[] | null> {
   const groups = '';
   const granularity = 'monthly';
 
   const endTime = new Date();
   const startTime = new Date();
-  startTime.setMonth(endTime.getMonth() - 2);
+  startTime.setMonth(endTime.getMonth() - MONTHS_TO_INCLUDE);
 
   const costReportsResponse: CostReportsResponse = await infrawalletApi.getCostReports(
     filters,
@@ -44,6 +53,7 @@ async function getFilteredCostReports(infrawalletApi: any, filters: string, tags
     granularity,
     startTime,
     endTime,
+    encodeURI(`${entity.metadata.namespace}/${entity.metadata.name}`),
   );
 
   if (costReportsResponse.status !== 200) {
@@ -178,7 +188,7 @@ function getRelativeChangeInPercentage(
   previousCost: number,
 ): { change: number; formattedChange: string } {
   const percentageChange = previousCost !== 0 ? ((currentCost - previousCost) / previousCost) * 100 : 0;
-  const percentageChangeFormatted = Math.abs(percentageChange).toFixed(2);
+  const percentageChangeFormatted = Math.abs(percentageChange).toFixed(NUM_DIGITS_AFTER_DECIMALPOINT);
   return { change: percentageChange, formattedChange: percentageChangeFormatted };
 }
 
@@ -292,15 +302,15 @@ const TotalCostTab = ({
           </Box>
         )}
         <Typography variant="h6" sx={{ fontWeight: 'bold' }}>
-          Current Month: ${totalCost.toFixed(2)}
+          Current Month: ${totalCost.toFixed(NUM_DIGITS_AFTER_DECIMALPOINT)}
         </Typography>
       </Box>
       <ResponsiveContainer width="100%" height={300}>
         <LineChart data={chartData}>
           <CartesianGrid strokeDasharray="3 3" />
           <XAxis dataKey="period" />
-          <YAxis />
-          <Tooltip />
+          <YAxis tickFormatter={(value: number) => `$${value.toFixed(0)}`} />
+          <Tooltip formatter={(value: number) => `$${value.toFixed(NUM_DIGITS_AFTER_DECIMALPOINT)}`} />
           <Legend />
           {projects.map((project, index) => (
             <Line
@@ -351,13 +361,13 @@ const ServiceBreakDownTab = ({
               serviceMark = '▲';
             }
 
-            const changeFormatted = Math.abs(row.change).toFixed(2);
+            const changeFormatted = Math.abs(row.change).toFixed(NUM_DIGITS_AFTER_DECIMALPOINT);
             return (
               <TableRow key={row.service}>
                 <TableCell component="th" scope="row">
                   {row.service}
                 </TableCell>
-                <TableCell align="right">${row.cost.toFixed(2)}</TableCell>
+                <TableCell align="right">${row.cost.toFixed(NUM_DIGITS_AFTER_DECIMALPOINT)}</TableCell>
                 <TableCell align="right">
                   <Box
                     sx={{
@@ -401,7 +411,7 @@ export const EntityInfraWalletCard = () => {
 
       let costReports: Report[] | null = [];
       try {
-        costReports = await getFilteredCostReports(infrawalletApi, filters, tags);
+        costReports = await getFilteredCostReports(infrawalletApi, entity, filters, tags);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to fetch cost reports');
         setErrorSeverity('error');

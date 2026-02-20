@@ -80,3 +80,8 @@ export type MetricCardProps = {
 export type BudgetsProps = {
   providerErrorsSetter: any;
 };
+
+export type HomePageProps = {
+  title?: string;
+  subTitle?: string;
+};

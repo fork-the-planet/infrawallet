@@ -1,0 +1,99 @@
+name: "InfraWallet Security and Quality"
+
+# Disable the default queries
+disable-default-queries: false
+
+# Define the queries to run
+queries:
+  - uses: security-extended
+  - uses: security-and-quality
+  - uses: security-experimental
+
+# Define paths to analyze
+paths:
+  - packages/app
+  - packages/backend
+  - plugins/infrawallet-backend
+  - plugins/infrawallet
+  - scripts
+
+# Define paths to ignore
+paths-ignore:
+  - node_modules
+  - "**/node_modules"
+  - "**/*.test.js"
+  - "**/*.test.ts"
+  - "**/*.spec.js"
+  - "**/*.spec.ts"
+  - "**/test/**"
+  - "**/tests/**"
+  - "**/build/**"
+  - "**/dist/**"
+  - "**/*.min.js"
+  - "**/vendor/**"
+  - "**/third-party/**"
+  - "**/.yarn/**"
+  - "**/.pnp.*"
+
+# Configure query filters for JavaScript/TypeScript
+query-filters:
+  - exclude:
+      # Exclude some noisy queries that might not be relevant
+      id:
+        - js/unused-local-variable # Can be noisy in development
+        - js/useless-assignment-to-property # Often intentional in some patterns
+      tags:
+        - maintainability # Focus on security first
+        - readability # Focus on security first
+  - include:
+      # Ensure all security queries are included
+      tags:
+        - security
+        - vulnerability
+        - injection
+        - xss
+        - sql-injection
+        - path-injection
+        - command-injection
+        - xxe
+        - ldap-injection
+        - log-injection
+        - xpath-injection
+        - template-injection
+        - regex-injection
+
+# Configure extraction to improve performance
+extraction:
+  javascript:
+    # Specify the Node.js version used in the project
+    index:
+      # Include TypeScript files
+      include:
+        - "**/*.ts"
+        - "**/*.tsx"
+        - "**/*.js"
+        - "**/*.jsx"
+        - "**/*.mjs"
+        - "**/*.cjs"
+      # Exclude test and build files
+      exclude:
+        - "**/*.test.js"
+        - "**/*.test.ts"
+        - "**/*.spec.js"
+        - "**/*.spec.ts"
+        - "**/jest.config.*"
+        - "**/webpack.config.*"
+        - "**/rollup.config.*"
+        - "**/vite.config.*"
+
+# Configure database creation
+database:
+  # Timeout for creating the database (in seconds)
+  timeout: 1800 # 30 minutes
+  # Number of threads to use
+  threads: 0 # Use all available threads
+
+# Configure the analysis
+analysis:
+  # Timeout for running queries (in seconds)
+  timeout: 3600 # 1 hour
